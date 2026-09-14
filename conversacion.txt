@@ -1,0 +1,126 @@
+Conversación - Proyecto Solucionador de Programación Lineal (PL)
+Fecha: 2026-09-12 a 2026-09-14
+==============================================================
+
+--------------------------------------------------------------
+1) "puedes iniciar el servicio localmente"
+--------------------------------------------------------------
+- Se detectó que faltaban las dependencias (Flask, PuLP, Plotly, NumPy, SciPy).
+- Se creó un entorno virtual (.venv) y se instaló requirements.txt.
+- Se levantó el servidor Flask en segundo plano (http://127.0.0.1:5000).
+- Se verificó GET / (200 OK) y POST /api/resolver con un caso de prueba:
+    max Z = 3x1 + 5x2
+    2x1<=... etc (ejemplo clásico) -> Z=36, x1=2, x2=6.
+- Restricciones activas (holgura 0): Restriccion_2 y Restriccion_3 (precios sombra
+  1.5 y 1.0). Restriccion_1 con holgura 2 (no limitante).
+
+--------------------------------------------------------------
+2) "que significa estos valores Análisis de Restricciones (Saturación)..."
+--------------------------------------------------------------
+El usuario mostró una tabla con holguras negativas para restricciones tipo ">=" (-12, -11)
+y preguntó qué significaba.
+
+Explicación dada:
+- PuLP calcula internamente holgura = RHS - LHS, sea cual sea el tipo de restricción
+  (confirmado leyendo el código fuente de pulp/apis/coin_api.py, assignConsSlack).
+- Para "<=": holgura >=0 significa recurso no usado; 0 = restricción activa (saturada).
+- Para ">=": la misma fórmula (RHS - LHS) da NEGATIVO cuando el mínimo se cumple
+  con holgura real (LHS > RHS), porque el signo está invertido respecto a la
+  intuición de "superávit". No es un error ni infactibilidad, es solo la
+  convención de signo de PuLP.
+- Restricciones saturadas (holgura=0) son las que determinan el óptimo; ahí el
+  precio sombra (c.pi) es económicamente interpretable (cuánto mejora Z si se
+  relaja la restricción una unidad).
+
+--------------------------------------------------------------
+3) "Sí, hazlo" (corregir el signo de la holgura)
+--------------------------------------------------------------
+Cambio en motor_optimizacion.py:
+- Se itera sobre `restricciones` (en vez de prob.constraints directamente) para
+  conocer el tipo de cada restricción.
+- holgura = c.slack si tipo != '>=' , si no, -c.slack.
+- Así la holgura reportada siempre es >=0 en una solución factible, y solo 0
+  cuando la restricción está activa, sin depender de la convención interna de
+  signo de PuLP.
+- Verificado con varios casos de prueba (restricciones <=, >=, binding y no
+  binding) por API: todos los valores quedaron no negativos y coherentes.
+
+--------------------------------------------------------------
+4) "actualiza también el frontend para mostrar esto bien"
+--------------------------------------------------------------
+- motor_optimizacion.py: cada entrada de restricciones_info ahora incluye
+  también "tipo" (<=, >=, =).
+- templates/index.html: la tabla "Análisis de Restricciones" ganó dos columnas
+  nuevas: Tipo y Precio Sombra (esta última solo se muestra si la restricción
+  está activa; si no, se muestra "—" porque no tiene lectura económica). Se
+  añadió una nota explicando ambos conceptos.
+- Se instaló Playwright + Chromium en el .venv (solo para pruebas visuales, no
+  se agregó a requirements.txt) y se verificó en el navegador real que la
+  tabla se renderiza correctamente.
+
+--------------------------------------------------------------
+5) "tengo 2 problemas: 1) el valor óptimo debe ser 6350 ... 2) en la gráfica
+   solo veo líneas verticales cuando debería ver líneas con pendiente"
+--------------------------------------------------------------
+Modelo del usuario:
+  max Z = 300x1 + 150x2
+  2x1 + 1x2 <= 40
+  1x1 + 3x2 <= 45
+  1x1 + 0x2 <= 12
+  1x1 + 0x2 >= 0
+  0x1 + 1x2 >= 0
+La app daba Z=5250, x1=12, x2=11.
+
+Diagnóstico:
+1. Valor óptimo: se resolvió el problema a mano por el método de vértices.
+   Vértices factibles: (0,0)->0, (12,0)->3600, (0,15)->2250, (12,11)->5250.
+   Conclusión: 5250 ES el óptimo matemáticamente correcto para esos datos;
+   el código estaba bien. No se pudo llegar a 6350 con esos números sin violar
+   x1<=12; se le indicó al usuario revisar si algún coeficiente del enunciado
+   original no coincidía con lo cargado en el formulario.
+
+2. Gráfico con solo líneas verticales: bug real, confirmado con Playwright
+   (se veían las anotaciones de texto de las restricciones diagonales pero NO
+   las líneas). Causa raíz encontrada inspeccionando el JSON devuelto por la
+   API: los arrays de NumPy (x_vals, y_vals) se estaban serializando en un
+   formato binario compacto ("bdata"), porque la librería `plotly` de Python
+   instalada era la v7.0.0, mientras que templates/index.html carga
+   plotly.js@2.27.0 desde CDN, una versión que no sabe decodificar "bdata".
+   Resultado: las trazas basadas en arrays de NumPy (rectas con pendiente y
+   horizontales) llegaban "vacías" al navegador; solo se veían las líneas
+   verticales porque esas se dibujan con fig.add_vline (números sueltos, no
+   arrays) y el punto óptimo (lista de Python plana, no array).
+
+   Fix aplicado en graficos.py: convertir x_vals/y_vals a listas de Python
+   (.tolist()) antes de pasarlas a go.Scatter, para que siempre viajen como
+   JSON estándar sin depender de que las versiones de plotly (Python) y
+   plotly.js (CDN) coincidan. Verificado en navegador: las rectas con
+   pendiente ya se ven correctamente.
+
+--------------------------------------------------------------
+6) "puedes colorear el area que cumple con las restricciones"
+--------------------------------------------------------------
+Se añadió en graficos.py el sombreado de la región factible (método gráfico
+clásico de PL):
+- _es_factible(x1, x2, restricciones, M, tol): evalúa si un punto cumple todas
+  las restricciones (<=, >=, =) y la no negatividad de las variables.
+- _calcular_vertices_region_factible(restricciones, M): construye todas las
+  rectas frontera (restricciones + ejes x1=0/x2=0 + bordes del recuadro
+  visible [0,M]x[0,M] para acotar visualmente regiones abiertas), calcula la
+  intersección de cada par de rectas, conserva solo los puntos que satisfacen
+  todas las restricciones a la vez, y ordena esos vértices por ángulo
+  alrededor de su centroide para poder dibujar el polígono sin que se crucen
+  los lados.
+- Ese polígono se dibuja primero (fill='toself', verde translúcido) para que
+  las rectas de restricción y el punto óptimo queden por encima.
+- Verificado con el modelo real del usuario (300x1+150x2, 5 restricciones) y
+  con el caso simple por defecto: el sombreado coincide con los vértices
+  esperados y el óptimo cae en una esquina de la región (como exige el
+  teorema fundamental de la PL).
+
+==============================================================
+Archivos modificados durante la conversación:
+- motor_optimizacion.py (signo de la holgura + campo "tipo" en la respuesta)
+- graficos.py (fix de serialización NumPy/plotly + sombreado de región factible)
+- templates/index.html (columnas Tipo/Precio Sombra + fix de reseteo de
+  coeficientes de la función objetivo al cambiar el número de variables)
